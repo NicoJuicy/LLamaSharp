@@ -7,7 +7,7 @@ using LLama.Native;
 namespace LLama.Extensions;
 
 /// <summary>
-/// Extention methods to the IModelParams interface
+/// Extension methods to the IModelParams interface
 /// </summary>
 public static class IModelParamsExtensions
 {
@@ -28,7 +28,8 @@ public static class IModelParamsExtensions
 
         var disposer = new GroupDisposable();
 
-        result = NativeApi.llama_model_default_params();
+        result = LLamaModelParams.Default();
+
         result.main_gpu = @params.MainGpu;
         result.split_mode = @params.SplitMode;
         result.n_gpu_layers = @params.GpuLayerCount < 0 ? int.MaxValue : @params.GpuLayerCount;

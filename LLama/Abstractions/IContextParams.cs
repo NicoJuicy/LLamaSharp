@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using LLama.Native;
 
 namespace LLama.Abstractions;
@@ -14,20 +14,29 @@ public interface IContextParams
     uint? ContextSize { get; }
 
     /// <summary>
-    /// batch size for prompt processing (must be >=32 to use BLAS) (n_batch)
+    /// maximum batch size that can be submitted at once (must be >=32 to use BLAS) (n_batch)
     /// </summary>
     uint BatchSize { get; }
 
     /// <summary>
-    /// Seed for the random number generator (seed)
+    /// Physical batch size
     /// </summary>
-    uint Seed { get; }
+    uint UBatchSize { get; }
 
     /// <summary>
-    /// Whether to use embedding mode. (embedding) Note that if this is set to true, 
-    /// The LLamaModel won't produce text response anymore.
+    /// max number of sequences (i.e. distinct states for recurrent models)
     /// </summary>
-    bool EmbeddingMode { get; }
+    uint SeqMax { get; }
+
+    /// <summary>
+    /// Seed for the random number generator (seed)
+    /// </summary>
+    uint? Seed { get; }
+
+    /// <summary>
+    /// If true, extract embeddings (together with logits).
+    /// </summary>
+    bool Embeddings { get; }
 
     /// <summary>
     /// RoPE base frequency (null to fetch from the model)
@@ -100,12 +109,18 @@ public interface IContextParams
     bool NoKqvOffload { get; }
 
     /// <summary>
-    /// defragment the KV cache if holes/size &gt; defrag_threshold, Set to &lt; 0 to disable (default)
+    /// Whether to use flash attention
     /// </summary>
-    float DefragThreshold { get; }
+    bool FlashAttention { get; }
 
     /// <summary>
-    /// Whether to pool (sum) embedding results by sequence id (ignored if no pooling layer)
+    /// defragment the KV cache if holes/size &gt; defrag_threshold, Set to &lt; 0 to disable (default)
+    /// defragment the KV cache if holes/size &gt; defrag_threshold, Set to <see langword="null"/> or &lt; 0 to disable (default)
     /// </summary>
-    bool DoPooling { get; }
+    float? DefragThreshold { get; }
+
+    /// <summary>
+    /// How to pool (sum) embedding results by sequence id (ignored if no pooling layer)
+    /// </summary>
+    LLamaPoolingType PoolingType { get; }
 }

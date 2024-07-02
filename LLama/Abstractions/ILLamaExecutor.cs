@@ -20,16 +20,15 @@ namespace LLama.Abstractions
         /// </summary>
         public bool IsMultiModal { get; }
         /// <summary>
-        /// Muti-Modal Projections / Clip Model weights
+        /// Multi-Modal Projections / Clip Model weights
         /// </summary>
-        public LLavaWeights? ClipModel { get;  }        
-        
+        public LLavaWeights? ClipModel { get;  }
+
         /// <summary>
-        /// List of images: Image filename and path (jpeg images).
+        /// List of images: List of images in byte array format.
         /// </summary>
-        public List<string> ImagePaths { get; set; }
-        
-        
+        public List<byte[]> Images { get; }
+
         /// <summary>
         /// Asynchronously infers a response from the model.
         /// </summary>

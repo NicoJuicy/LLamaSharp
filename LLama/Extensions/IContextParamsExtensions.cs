@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using LLama.Abstractions;
 using LLama.Native;
@@ -6,7 +6,7 @@ using LLama.Native;
 namespace LLama.Extensions
 {
     /// <summary>
-    /// Extention methods to the IContextParams interface
+    /// Extension methods to the IContextParams interface
     /// </summary>
     public static class IContextParamsExtensions
     {
@@ -20,11 +20,14 @@ namespace LLama.Extensions
         /// <exception cref="ArgumentException"></exception>
         public static void ToLlamaContextParams(this IContextParams @params, out LLamaContextParams result)
         {
-            result = NativeApi.llama_context_default_params();
+            result = LLamaContextParams.Default();
+
             result.n_ctx = @params.ContextSize ?? 0;
             result.n_batch = @params.BatchSize;
-            result.seed = @params.Seed;
-            result.embedding = @params.EmbeddingMode;
+            result.n_ubatch = @params.UBatchSize;
+            result.n_seq_max = @params.SeqMax;
+            result.seed = @params.Seed ?? 0xFFFFFFFF;
+            result.embeddings = @params.Embeddings;
             result.rope_freq_base = @params.RopeFrequencyBase ?? 0;
             result.rope_freq_scale = @params.RopeFrequencyScale ?? 0;
 
@@ -36,15 +39,19 @@ namespace LLama.Extensions
             result.yarn_orig_ctx = @params.YarnOriginalContext ?? 0;
             result.rope_scaling_type = @params.YarnScalingType ?? RopeScalingType.Unspecified;
 
-            result.defrag_threshold = @params.DefragThreshold;
+            result.defrag_threshold = @params.DefragThreshold ?? -1;
 
             result.cb_eval = IntPtr.Zero;
             result.cb_eval_user_data = IntPtr.Zero;
 
+            result.abort_callback = IntPtr.Zero;
+            result.abort_callback_user_data = IntPtr.Zero;
+
             result.type_k = @params.TypeK ?? GGMLType.GGML_TYPE_F16;
-            result.type_k = @params.TypeV ?? GGMLType.GGML_TYPE_F16;
+            result.type_v = @params.TypeV ?? GGMLType.GGML_TYPE_F16;
             result.offload_kqv = !@params.NoKqvOffload;
-            result.do_pooling = @params.DoPooling;
+            result.flash_attention = @params.FlashAttention;
+            result.llama_pooling_type = @params.PoolingType;
 
             result.n_threads = Threads(@params.Threads);
             result.n_threads_batch = Threads(@params.BatchThreads);

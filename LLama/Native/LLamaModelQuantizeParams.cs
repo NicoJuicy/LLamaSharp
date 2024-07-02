@@ -21,6 +21,16 @@ namespace LLama.Native
         public LLamaFtype ftype;
 
         /// <summary>
+        /// output tensor type
+        /// </summary>
+        public GGMLType output_tensor_type;
+
+        /// <summary>
+        /// itoken embeddings tensor type
+        /// </summary>
+        public GGMLType token_embedding_type;
+
+        /// <summary>
         /// allow quantizing non-f32/f16 tensors
         /// </summary>
         public bool allow_requantize
@@ -51,7 +61,7 @@ namespace LLama.Native
         private sbyte _only_copy;
 
         /// <summary>
-        /// disable k-quant mixtures and quantize all tensors to the same type
+        /// quantize all tensors to the default type
         /// </summary>
         public bool pure
         {
@@ -61,8 +71,35 @@ namespace LLama.Native
         private sbyte _pure;
 
         /// <summary>
+        /// quantize to the same number of shards
+        /// </summary>
+        public bool keep_split
+        {
+            get => Convert.ToBoolean(_keep_split);
+            set => _keep_split = Convert.ToSByte(value);
+        }
+        private sbyte _keep_split;
+
+        /// <summary>
         /// pointer to importance matrix data
         /// </summary>
         public IntPtr imatrix;
+
+        /// <summary>
+        /// pointer to vector containing overrides
+        /// </summary>
+        public IntPtr kv_overrides;
+
+        /// <summary>
+        /// Create a LLamaModelQuantizeParams with default values
+        /// </summary>
+        /// <returns></returns>
+        public static LLamaModelQuantizeParams Default()
+        {
+            return llama_model_quantize_default_params();
+
+            [DllImport(NativeApi.libraryName, CallingConvention = CallingConvention.Cdecl)]
+            static extern LLamaModelQuantizeParams llama_model_quantize_default_params();
+        }
     }
 }

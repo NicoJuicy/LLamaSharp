@@ -1,5 +1,6 @@
-﻿using LLama;
+using LLama;
 using LLama.Common;
+using LLama.Native;
 using Microsoft.KernelMemory;
 using Microsoft.KernelMemory.AI;
 
@@ -29,7 +30,10 @@ namespace LLamaSharp.KernelMemory
             this._config = config;
             var @params = new ModelParams(_config.ModelPath)
             {
-                EmbeddingMode = true,
+                ContextSize = config.ContextSize ?? 2048,
+                Seed = config.Seed ?? 0,
+                GpuLayerCount = config.GpuLayerCount ?? 20,
+                Embeddings = true,
                 MainGpu = _config.MainGpu,
                 SplitMode = _config.SplitMode
             };
@@ -49,7 +53,10 @@ namespace LLamaSharp.KernelMemory
             this._config = config;
             var @params = new ModelParams(_config.ModelPath)
             {
-                EmbeddingMode = true,
+                ContextSize = config.ContextSize ?? 2048,
+                Seed = config.Seed ?? 0,
+                GpuLayerCount = config.GpuLayerCount ?? 20,
+                Embeddings = true,
                 MainGpu = _config.MainGpu,
                 SplitMode = _config.SplitMode
             };
@@ -104,6 +111,6 @@ namespace LLamaSharp.KernelMemory
         }
 
         /// <inheritdoc/>
-        public int CountTokens(string text) => _embedder.Context.Tokenize(text).Length;
+        public int CountTokens(string text) => _embedder.Context.Tokenize(text, special: true).Length;
     }
 }

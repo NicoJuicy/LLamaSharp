@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Runtime.InteropServices;
 
 namespace LLama.Native
@@ -30,6 +30,11 @@ namespace LLama.Native
         public float* tensor_split;
 
         /// <summary>
+        /// comma separated list of RPC servers to use for offloading
+        /// </summary>
+        public byte* rpc_servers;
+
+        /// <summary>
         /// called with a progress value between 0 and 1, pass NULL to disable. If the provided progress_callback
         /// returns true, model loading continues. If it returns false, model loading is immediately aborted.
         /// </summary>
@@ -38,7 +43,7 @@ namespace LLama.Native
         // as NET Framework 4.8 does not play nice with the LlamaProgressCallback type
         public IntPtr progress_callback;
 #else
-        public LlamaProgressCallback progress_callback;
+        public LlamaProgressCallback? progress_callback;
 #endif
 
         /// <summary>
@@ -80,5 +85,27 @@ namespace LLama.Native
             set => _use_mlock = Convert.ToSByte(value);
         }
         private sbyte _use_mlock;
+
+        /// <summary>
+        /// validate model tensor data
+        /// </summary>
+        public bool check_tensors
+        {
+            readonly get => Convert.ToBoolean(_check_tensors);
+            set => _check_tensors = Convert.ToSByte(value);
+        }
+        private sbyte _check_tensors;
+
+        /// <summary>
+        /// Create a LLamaModelParams with default values
+        /// </summary>
+        /// <returns></returns>
+        public static LLamaModelParams Default()
+        {
+            return llama_model_default_params();
+
+            [DllImport(NativeApi.libraryName, CallingConvention = CallingConvention.Cdecl)]
+            static extern LLamaModelParams llama_model_default_params();
+        }
     }
 }

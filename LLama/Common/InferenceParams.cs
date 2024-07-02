@@ -1,5 +1,4 @@
 ﻿using LLama.Abstractions;
-using System;
 using System.Collections.Generic;
 using LLama.Native;
 using LLama.Sampling;
@@ -7,7 +6,7 @@ using LLama.Sampling;
 namespace LLama.Common
 {
     /// <summary>
-    /// The paramters used for inference.
+    /// The parameters used for inference.
     /// </summary>
     public record InferenceParams
         : IInferenceParams
@@ -31,7 +30,7 @@ namespace LLama.Common
         /// <summary>
         /// Sequences where the model will stop generating further tokens.
         /// </summary>
-        public IReadOnlyList<string> AntiPrompts { get; set; } = Array.Empty<string>();
+        public IReadOnlyList<string> AntiPrompts { get; set; } = [];
 
         /// <inheritdoc />
         public int TopK { get; set; } = 40;

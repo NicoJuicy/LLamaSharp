@@ -1,13 +1,7 @@
-﻿using LLama;
-using LLama.Abstractions;
+using LLama;
 using LLama.Common;
 using LLama.Native;
 using Microsoft.KernelMemory.AI;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace LLamaSharp.KernelMemory
 {
@@ -60,7 +54,7 @@ namespace LLamaSharp.KernelMemory
             _context = context;
             _executor = executor ?? new StatelessExecutor(_weights, _context.Params);
             _defaultInferenceParams = inferenceParams;
-            MaxTokenTotal = (int)_context.Params.ContextSize;
+            MaxTokenTotal = (int)_context.ContextSize;
         }
 
         /// <inheritdoc/>
@@ -111,6 +105,6 @@ namespace LLamaSharp.KernelMemory
         }
 
         /// <inheritdoc/>
-        public int CountTokens(string text) => _context.Tokenize(text).Length;
+        public int CountTokens(string text) => _context.Tokenize(text, special: true).Length;
     }
 }

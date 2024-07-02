@@ -1,7 +1,9 @@
-﻿using System;
+using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using LLama.Native;
 
 namespace LLama.Batched;
@@ -14,9 +16,18 @@ public sealed class Conversation
 {
     private ulong _requiredEpoch;
     private LLamaPos _end;
-    private int _batchIndex;
     private bool _disposed;
+
+    /// <summary>
+    /// Indicates if this conversation has been "forked" and may share logits with another conversation.
+    /// </summary>
     private bool _forked;
+
+    /// <summary>
+    /// Stores the indices to sample from. Contains <see cref="_batchSampleCount"/> valid items.
+    /// </summary>
+    private int[] _batchSampleIndices = new int[4];
+    private int _batchSampleCount;
 
     /// <summary>
     /// The executor which this conversation belongs to
@@ -107,7 +118,8 @@ public sealed class Conversation
             // logits, so sampling one conversation may mess up the fork! Setting the "forked" flag on both sequences ensures
             // they both copy the logits before the next sampling run, to fix this issue.
             _requiredEpoch = _requiredEpoch,
-            _batchIndex = _batchIndex,
+            _batchSampleIndices = _batchSampleIndices.ToArray(),
+            _batchSampleCount = _batchSampleCount,
             _forked = true,
 
             _end = _end,
@@ -127,11 +139,12 @@ public sealed class Conversation
     /// <summary>
     /// Get the logits from this conversation, ready for sampling
     /// </summary>
+    /// <param name="offset">How far from the <b>end</b> of the previous prompt should logits be sampled. Any value other than 0 requires allLogits to have been set during prompting</param>
     /// <returns></returns>
     /// <exception cref="ObjectDisposedException"></exception>
     /// <exception cref="CannotSampleRequiresPromptException">Thrown if this conversation was not prompted before the previous call to infer</exception>
     /// <exception cref="CannotSampleRequiresInferenceException">Thrown if Infer() must be called on the executor</exception>
-    public Span<float> Sample()
+    public Span<float> Sample(int offset = 0)
     {
         AssertNotDisposed();
 
@@ -139,8 +152,11 @@ public sealed class Conversation
             throw new CannotSampleRequiresPromptException();
         if (_requiredEpoch > Executor.Epoch)
             throw new CannotSampleRequiresInferenceException();
-
-        var span = Executor.Context.NativeHandle.GetLogitsIth(_batchIndex);
+        if (offset >= _batchSampleCount)
+            throw new ArgumentException("Cannot sample offset more than the previous prompt count", nameof(offset));
+        
+        var index = _batchSampleIndices[_batchSampleCount - offset - 1];
+        var span = Executor.Context.NativeHandle.GetLogitsIth(index);
 
         // If necessary copy the span, to protect it from modification. This is only done when
         // this conversation has been forked in this epoch.
@@ -163,29 +179,18 @@ public sealed class Conversation
     /// <summary>
     /// Add tokens to this conversation
     /// </summary>
-    /// <param name="input"></param>
-    /// <returns></returns>
-    public void Prompt(string input)
-    {
-        AssertCanBePrompted();
-
-        Prompt(Executor.Context.Tokenize(input));
-    }
-
-    /// <summary>
-    /// Add tokens to this conversation
-    /// </summary>
     /// <param name="tokens"></param>
+    /// <param name="allLogits">If true, generate logits for all tokens. If false, only generate logits for the last token.</param>
     /// <returns></returns>
     /// <exception cref="ObjectDisposedException"></exception>
     /// <exception cref="AlreadyPromptedConversationException"></exception>
-    public void Prompt(List<LLamaToken> tokens)
+    public void Prompt(List<LLamaToken> tokens, bool allLogits = false)
     {
         AssertCanBePrompted();
 
 #if NET6_0_OR_GREATER
         var span = CollectionsMarshal.AsSpan(tokens);
-        Prompt(span);
+        Prompt(span, allLogits);
 #else
         // Borrow an array and copy tokens into it
         var arr = ArrayPool<LLamaToken>.Shared.Rent(tokens.Count);
@@ -202,15 +207,16 @@ public sealed class Conversation
         }
 #endif
     }
-
+    
     /// <summary>
     /// Add tokens to this conversation
     /// </summary>
     /// <param name="tokens"></param>
+    /// <param name="allLogits">If true, generate logits for all tokens. If false, only generate logits for the last token.</param>
     /// <returns></returns>
     /// <exception cref="ObjectDisposedException"></exception>
     /// <exception cref="AlreadyPromptedConversationException"></exception>
-    public void Prompt(ReadOnlySpan<LLamaToken> tokens)
+    public void Prompt(ReadOnlySpan<LLamaToken> tokens, bool allLogits = false)
     {
         AssertCanBePrompted();
 
@@ -219,11 +225,39 @@ public sealed class Conversation
             return;
 
         // Add the prompt to the batch
-        for (var i = 0; i < tokens.Length; i++)
-            _batchIndex = Executor.Batch.Add(tokens[i], _end++, ConversationId, i == tokens.Length - 1);
-
-        // Mark this conversation as needing inference/sampling
-        _requiredEpoch = Executor.Epoch + 1;
+        if (allLogits)
+        {
+            if (_batchSampleIndices.Length < tokens.Length)
+                _batchSampleIndices = new int[tokens.Length];
+            
+            _batchSampleCount = tokens.Length;
+            
+            // We need to add all tokens to a single batch, so they can all be sampled at once.
+            // Request a batch with sufficient space.
+            (var batch, _requiredEpoch) = Executor.GetTokenBatch(tokens.Length);
+            
+            // Add everything to that batch
+            for (var i = 0; i < tokens.Length; i++)
+                _batchSampleIndices[i] = batch.Add(tokens[i], _end++, ConversationId, true);
+        }
+        else
+        {
+            _batchSampleCount = 1;
+            
+            while (tokens.Length > 0)
+            {
+                // Get a batch with capacity for at least 1 token
+                (var batch, _requiredEpoch) = Executor.GetTokenBatch();
+                
+                // Add as many tokens as possible
+                var count = Math.Min(tokens.Length, checked((int)Executor.Context.BatchSize) - batch.TokenCount);
+                for (var i = 0; i < count; i++)
+                    _batchSampleIndices[0] = batch.Add(tokens[i], _end++, ConversationId, i == tokens.Length - 1);
+                
+                // Slice the array to remove tokens we've already added to a batch
+                tokens = tokens.Slice(count);
+            }
+        }
 
         // Unset the forked flag. Since this conversation has just been prompted it's no longer
         // sharing anything with any other conversations.
@@ -240,11 +274,75 @@ public sealed class Conversation
     public void Prompt(LLamaToken token)
     {
         AssertCanBePrompted();
+        
+        Span<LLamaToken> span = [ token ];
+        Prompt(span);
+    }
 
-        unsafe
+    /// <summary>
+    /// Prompt this conversation with an image embedding
+    /// </summary>
+    /// <param name="embedding"></param>
+    public void Prompt(SafeLlavaImageEmbedHandle embedding)
+    {
+        AssertCanBePrompted();
+
+        if (embedding.Model.EmbeddingDimensions != Executor.Model.EmbeddingSize)
+            throw new ArgumentException($"Embedding dimension mismatch between image embedding ({embedding.Model.EmbeddingDimensions}) and model ({Executor.Model.EmbeddingSize})");
+        
+        // Get a temporary array large enough to hold one embedding item
+        var tempArr = ArrayPool<float>.Shared.Rent(embedding.Model.EmbeddingDimensions);
+        var tempSpan = tempArr.AsSpan(0, embedding.Model.EmbeddingDimensions);
+        try
         {
-            Span<LLamaToken> span = stackalloc LLamaToken[1] { token };
-            Prompt(span);
+            for (var i = 0; i < embedding.Model.PatchCount; i++)
+            {
+                // Get a batch with space
+                (var batch, _requiredEpoch) = Executor.GetEmbeddingBatch();
+                
+                batch.Add(
+                    (i, embedding),
+                    static (Span<float> dest, (int index, SafeLlavaImageEmbedHandle embedding) tup) => tup.embedding.GetEmbedding(dest, tup.index),
+                    _end++,
+                    ConversationId,
+                    i == embedding.Model.PatchCount - 1
+                );
+            }
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(tempArr);
+        }
+    }
+
+    /// <summary>
+    /// Prompt this conversation with embeddings
+    /// </summary>
+    /// <param name="embeddings">The raw values of the embeddings. This span must divide equally by the embedding size of this model.</param>
+    public void Prompt(ReadOnlySpan<float> embeddings)
+    {
+        AssertCanBePrompted();
+
+        var dim = Executor.Model.EmbeddingSize;
+        var count = embeddings.Length / dim;
+        if (count * dim != embeddings.Length)
+            throw new ArgumentException($"Incorrect embeddings span size, length ({embeddings.Length}) must be divisible by embedding dimensions ({Executor.Model.EmbeddingSize})");
+
+        while (embeddings.Length > 0)
+        {
+            // Get a batch with space
+            (var batch, _requiredEpoch) = Executor.GetEmbeddingBatch();
+
+            // Add 1 embedding to the batch
+            batch.Add(
+                embeddings.Slice(0, dim),
+                _end++,
+                ConversationId,
+                embeddings.Length == dim
+            );
+
+            // Advance to next embedding
+            embeddings = embeddings.Slice(dim);
         }
     }
     #endregion
@@ -349,5 +447,169 @@ public sealed class Conversation
     /// <param name="kv">An <see cref="KvAccessor"/> which allows direct access to modify the KV cache</param>
     /// <returns>The new end token position</returns>
     public delegate LLamaPos ModifyKvCache(LLamaPos end, KvAccessor kv);
+    #endregion
+
+    #region save/load
+    private void AssertCanLoad()
+    {
+        AssertNotDisposed();
+        if (_end.Value > 0)
+            throw new InvalidOperationException("Cannot load into a non-empty conversation");
+    }
+
+    private void AssertCanSave()
+    {
+        AssertNotDisposed();
+        if (RequiresInference)
+            throw new CannotSaveWhileRequiresInferenceException();
+    }
+
+
+    /// <summary>
+    /// Save the complete state of this conversation to a file. if the file already exists it will be overwritten.
+    /// </summary>
+    /// <param name="filepath"></param>
+    /// <exception cref="CannotSaveWhileRequiresInferenceException"></exception>
+    public void Save(string filepath)
+    {
+        AssertCanSave();
+
+        // Prepare extra state to put into file header
+        var state = GetState();
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(state);
+
+        // Save extra state along with the KV cache
+        Executor.Context.SaveState(filepath, ConversationId, bytes);
+    }
+
+    /// <summary>
+    /// Save the complete state of this conversation in system memory.
+    /// </summary>
+    /// <returns></returns>
+    public State Save()
+    {
+        AssertCanSave();
+
+        return new PrivateState(
+            Executor.Context.GetState(ConversationId),
+            GetState()
+        );
+    }
+
+
+    /// <summary>
+    /// Load state from a file
+    /// This should only ever be called by the BatchedExecutor, on a newly created conversation object!
+    /// </summary>
+    /// <param name="filepath"></param>
+    /// <exception cref="InvalidOperationException"></exception>
+    internal void Load(string filepath)
+    {
+        AssertCanLoad();
+
+        // Load the state from file into the KV cache
+        Executor.Context.LoadState(filepath, ConversationId, out var header);
+
+        // deserialize the extra state in the file header
+        var state = JsonSerializer.Deserialize<SerializableConversationState>(header);
+        if (state == null)
+        {
+            Dispose();
+            throw new InvalidOperationException("Failed to deserialize - deserialized header state was null");
+        }
+
+        Load(state);
+    }
+
+    /// <summary>
+    /// Load state from a previously saved state.
+    /// This should only ever be called by the BatchedExecutor, on a newly created conversation object!
+    /// </summary>
+    /// <param name="state"></param>
+    internal void Load(State state)
+    {
+        AssertCanLoad();
+
+        // There is only one class that extends State and it is PrivateState, so this cast is safe.
+        var priv = (PrivateState)state;
+
+        // Load the state from file into the KV cache
+        Executor.Context.LoadState(priv.SequenceState, ConversationId);
+
+        Load(priv.ConversationState);
+    }
+
+
+    private void Load(SerializableConversationState state)
+    {
+        if (state.Version != 1)
+            throw new InvalidOperationException("Failed to deserialize - mismatched version number");
+
+        // Load extra conversation state
+        _end = state.TokenCount;
+    }
+
+    private SerializableConversationState GetState()
+    {
+        return new SerializableConversationState(
+            Version: 1,
+            TokenCount: TokenCount
+        );
+    }
+
+
+    private record SerializableConversationState(int Version, int TokenCount);
+
+    private sealed class PrivateState
+        : State
+    {
+        public readonly LLamaContext.SequenceState SequenceState;
+        public readonly SerializableConversationState ConversationState;
+
+        public override ulong Size => SequenceState.Size;
+
+        public PrivateState(LLamaContext.SequenceState sequenceState, SerializableConversationState conversationState)
+        {
+            SequenceState = sequenceState;
+            ConversationState = conversationState;
+        }
+
+        /// <inheritdoc />
+        public override void Dispose()
+        {
+            if (IsDisposed)
+                throw new ObjectDisposedException(nameof(State));
+            IsDisposed = true;
+
+            SequenceState.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// In memory saved state of a <see cref="Conversation"/>
+    /// </summary>
+    public abstract class State
+        : IDisposable
+    {
+        /// <summary>
+        /// Indicates if this state has been disposed
+        /// </summary>
+        public bool IsDisposed { get; protected set; }
+
+        /// <summary>
+        /// Get the size in bytes of this state object
+        /// </summary>
+        public abstract ulong Size { get; }
+
+        /// <inheritdoc />
+        public abstract void Dispose();
+
+        /// <summary>
+        /// Internal constructor prevent anyone outside of LLamaSharp extending this class
+        /// </summary>
+        internal State()
+        {
+        }
+    }
     #endregion
 }

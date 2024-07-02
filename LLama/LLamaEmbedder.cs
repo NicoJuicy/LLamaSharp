@@ -1,4 +1,4 @@
-﻿using LLama.Native;
+using LLama.Native;
 using System;
 using LLama.Exceptions;
 using LLama.Abstractions;
@@ -32,7 +32,7 @@ namespace LLama
         /// <param name="logger"></param>
         public LLamaEmbedder(LLamaWeights weights, IContextParams @params, ILogger? logger = null)
         {
-            if (!@params.EmbeddingMode)
+            if (!@params.Embeddings)
                 throw new ArgumentException("EmbeddingMode must be true", nameof(@params));
 
             Context = weights.CreateContext(@params, logger);
@@ -67,7 +67,7 @@ namespace LLama
             // Evaluate prompt in batch-size chunks
             var n_past = 0;
             var batch = new LLamaBatch();
-            var batchSize = (int)Context.Params.BatchSize;
+            var batchSize = (int)Context.BatchSize;
             for (var i = 0; i < tokens.Length; i += batchSize)
             {
                 var n_eval = tokens.Length - i;
@@ -75,7 +75,7 @@ namespace LLama
                     n_eval = batchSize;
 
                 batch.Clear();
-                batch.AddRange(tokens.AsSpan(i, n_eval), n_past, LLamaSeqId.Zero, false);
+                batch.AddRange(tokens.AsSpan(i, n_eval), n_past, LLamaSeqId.Zero, true);
                 n_past += n_eval;
 
                 var returnCode = await Context.DecodeAsync(batch, cancellationToken);
@@ -97,10 +97,18 @@ namespace LLama
 
         private float[] GetEmbeddingsArray()
         {
-            var embeddings = NativeApi.llama_get_embeddings(Context.NativeHandle);
-            if (embeddings == null)
-                return Array.Empty<float>();
-            return embeddings.ToArray();
+            unsafe
+            {
+                var embeddings = NativeApi.llama_get_embeddings(Context.NativeHandle);
+
+                if (embeddings == null)
+                    embeddings = NativeApi.llama_get_embeddings_seq(Context.NativeHandle, LLamaSeqId.Zero);
+
+                if (embeddings == null)
+                    return Array.Empty<float>();
+
+                return new Span<float>(embeddings, Context.EmbeddingSize).ToArray();
+            }
         }
 
         private static void Normalize(Span<float> embeddings)
@@ -110,6 +118,10 @@ namespace LLama
             foreach (var value in embeddings)
                 lengthSqr += value * value;
             var length = (float)Math.Sqrt(lengthSqr);
+
+            // Do not divide by length if it is zero
+            if (length <= float.Epsilon)
+                return;
 
             // Normalize
             for (var i = 0; i < embeddings.Length; i++)

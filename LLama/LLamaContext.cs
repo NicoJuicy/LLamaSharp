@@ -1,4 +1,4 @@
-﻿using LLama.Exceptions;
+using LLama.Exceptions;
 using LLama.Native;
 using System;
 using System.Collections.Generic;
@@ -9,7 +9,6 @@ using System.IO.MemoryMappedFiles;
 using LLama.Common;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
-using LLama.Extensions;
 using LLama.Abstractions;
 using LLama.Sampling;
 using Microsoft.Extensions.Logging;
@@ -56,20 +55,13 @@ namespace LLama
         /// </summary>
         public Encoding Encoding { get; }
 
-        private uint _generationThreads;
-        private uint _batchThreads;
-
         /// <summary>
         /// Get or set the number of threads to use for generation
         /// </summary>
         public uint GenerationThreads
         {
-            get => _generationThreads;
-            set
-            {
-                _generationThreads = value;
-                NativeHandle.SetThreads(_generationThreads, _batchThreads);
-            }
+            get => NativeHandle.GenerationThreads;
+            set => NativeHandle.GenerationThreads = value;
         }
 
         /// <summary>
@@ -77,18 +69,16 @@ namespace LLama
         /// </summary>
         public uint BatchThreads
         {
-            get => _batchThreads;
-            set
-            {
-                _batchThreads = value;
-                NativeHandle.SetThreads(_generationThreads, _batchThreads);
-            }
+            get => NativeHandle.BatchThreads;
+            set => NativeHandle.BatchThreads = value;
         }
 
         /// <summary>
         /// Get the maximum batch size for this context
         /// </summary>
         public uint BatchSize => NativeHandle.BatchSize;
+        
+        private LLamaTokenData[]? _samplingBuffer;
 
         /// <summary>
         /// Create a new LLamaContext for the given LLamaWeights
@@ -109,10 +99,6 @@ namespace LLama
 
             @params.ToLlamaContextParams(out var lparams);
             NativeHandle = SafeLLamaContextHandle.Create(model.NativeHandle, lparams);
-
-            // It's not possible to get these values from llama.cpp, store a copy of them here.
-            _generationThreads = lparams.n_threads;
-            _batchThreads = lparams.n_threads_batch;
         }
 
         /// <summary>
@@ -152,6 +138,7 @@ namespace LLama
             return decoder.Read();
         }
 
+        #region state load/save
         /// <summary>
         /// Save the state to specified path.
         /// </summary>
@@ -163,7 +150,7 @@ namespace LLama
                 File.Delete(filename);
 
             // Estimate size of state to write to disk, this is always equal to or greater than the actual size
-            var estimatedStateSize = (long)NativeApi.llama_get_state_size(NativeHandle);
+            var estimatedStateSize = checked((long)NativeHandle.GetStateSize());
 
             // Map the file and write the bytes directly to it. This saves copying the bytes into a C# array
             long writtenBytes;
@@ -174,8 +161,53 @@ namespace LLama
                 {
                     byte* ptr = null;
                     view.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
-                    writtenBytes = (long)NativeApi.llama_copy_state_data(NativeHandle, ptr);
-                    view.SafeMemoryMappedViewHandle.ReleasePointer();
+                    try
+                    {
+                        writtenBytes = (long)NativeHandle.GetState(ptr, (ulong)estimatedStateSize);
+                    }
+                    finally
+                    {
+                        view.SafeMemoryMappedViewHandle.ReleasePointer();
+                    }
+                }
+            }
+
+            // Truncate the file to the actual size of data that was written
+            using (var fileStream = new FileStream(filename, FileMode.Open))
+                fileStream.SetLength(writtenBytes);
+        }
+
+        /// <summary>
+        /// Save the state of a particular sequence to specified path.
+        /// </summary>
+        /// <param name="filename"></param>
+        /// <param name="sequence"></param>
+        public void SaveState(string filename, LLamaSeqId sequence)
+        {
+            // Delete that file before overwriting it
+            if (File.Exists(filename))
+                File.Delete(filename);
+
+            // Estimate size of state to write to disk, this is always equal to or greater than the actual size
+            var estimatedStateSize = checked((long)NativeHandle.GetStateSize(sequence));
+
+            // Map the file and write the bytes directly to it. This saves copying the bytes into a C# array
+            long writtenBytes;
+            using (var file = MemoryMappedFile.CreateFromFile(filename, FileMode.Create, null, estimatedStateSize))
+            using (var view = file.CreateViewAccessor(0, estimatedStateSize))
+            {
+                unsafe
+                {
+                    byte* ptr = null;
+                    view.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
+                    try
+                    {
+                        writtenBytes = (long)NativeHandle.GetState(ptr, (ulong)estimatedStateSize, sequence);
+                    }
+                    finally
+                    {
+                        view.SafeMemoryMappedViewHandle.ReleasePointer();
+                    }
                 }
             }
 
@@ -187,7 +219,7 @@ namespace LLama
         /// <summary>
         /// Get the state data as an opaque handle, which can be loaded later using <see cref="LoadState(State)"/>
         /// </summary>
-        /// <remarks>Use <see cref="SaveState"/> if you intend to save this state to disk.</remarks>
+        /// <remarks>Use <see cref="SaveState(string)"/> if you intend to save this state to disk.</remarks>
         /// <returns></returns>
         public State GetState()
         {
@@ -198,7 +230,11 @@ namespace LLama
             try
             {
                 // Copy the state data into memory, discover the actual size required
-                var actualSize = NativeHandle.GetState(memory, stateSize);
+                ulong actualSize;
+                unsafe
+                {
+                    actualSize = NativeHandle.GetState((byte*)memory, stateSize);
+                }
 
                 // Shrink to size
                 memory = Marshal.ReAllocHGlobal(memory, (nint)actualSize);
@@ -219,10 +255,47 @@ namespace LLama
         }
 
         /// <summary>
+        /// Get the state data as an opaque handle, which can be loaded later using <see cref="LoadState(State)"/>
+        /// </summary>
+        /// <remarks>Use <see cref="SaveState(string, LLamaSeqId)"/> if you intend to save this state to disk.</remarks>
+        /// <returns></returns>
+        public SequenceState GetState(LLamaSeqId sequence)
+        {
+            var stateSize = NativeHandle.GetStateSize(sequence);
+
+            // Allocate a chunk of memory large enough to hold the entire state
+            var memory = Marshal.AllocHGlobal((nint)stateSize);
+            try
+            {
+                // Copy the state data into memory, discover the actual size required
+                ulong actualSize;
+                unsafe
+                {
+                    actualSize = NativeHandle.GetState((byte*)memory, stateSize, sequence);
+                }
+
+                // Shrink to size
+                memory = Marshal.ReAllocHGlobal(memory, (nint)actualSize);
+
+                // Wrap memory in a "state"
+                var state = new SequenceState(memory, actualSize);
+
+                // Set memory to zero, to prevent it being freed in finally block
+                memory = IntPtr.Zero;
+
+                return state;
+            }
+            finally
+            {
+                if (memory != IntPtr.Zero)
+                    Marshal.FreeHGlobal(memory);
+            }
+        }
+
+        /// <summary>
         /// Load the state from specified path.
         /// </summary>
         /// <param name="filename"></param>
-        /// <exception cref="RuntimeError"></exception>
         public void LoadState(string filename)
         {
             // Map state file into memory and pass that pointer directly to `llama_set_state_data` to load from
@@ -233,8 +306,41 @@ namespace LLama
                 {
                     byte* ptr = null;
                     view.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
-                    NativeApi.llama_set_state_data(NativeHandle, ptr);
-                    view.SafeMemoryMappedViewHandle.ReleasePointer();
+                    try
+                    {
+                        NativeHandle.SetState(ptr);
+                    }
+                    finally
+                    {
+                        view.SafeMemoryMappedViewHandle.ReleasePointer();
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Load the state from specified path into a particular sequence
+        /// </summary>
+        /// <param name="filename"></param>
+        /// <param name="sequence"></param>
+        public void LoadState(string filename, LLamaSeqId sequence)
+        {
+            // Map state file into memory and pass that pointer directly to `llama_set_state_data` to load from
+            using (var file = MemoryMappedFile.CreateFromFile(filename, FileMode.Open, null))
+            using (var view = file.CreateViewAccessor())
+            {
+                unsafe
+                {
+                    byte* ptr = null;
+                    view.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
+                    try
+                    {
+                        NativeHandle.SetState(ptr, sequence);
+                    }
+                    finally
+                    {
+                        view.SafeMemoryMappedViewHandle.ReleasePointer();
+                    }
                 }
             }
         }
@@ -248,9 +354,24 @@ namespace LLama
         {
             unsafe
             {
-                NativeHandle.SetState((byte*)state.DangerousGetHandle().ToPointer());
+                NativeHandle.SetState((byte*)state.DangerousGetHandle());
             }
         }
+
+        /// <summary>
+        /// Load the state from memory into a particular sequence
+        /// </summary>
+        /// <param name="state"></param>
+        /// <param name="sequence"></param>
+        /// <exception cref="RuntimeError"></exception>
+        public void LoadState(SequenceState state, LLamaSeqId sequence)
+        {
+            unsafe
+            {
+                NativeHandle.SetState((byte*)state.DangerousGetHandle(), sequence);
+            }
+        }
+        #endregion
 
         /// <summary>
         /// Sample a single token from this context, using the given sampling pipeline
@@ -357,11 +478,13 @@ namespace LLama
             }
 
             // Save the newline logit value
-            var nl_token = NativeApi.llama_token_nl(NativeHandle.ModelHandle);
-            var nl_logit = logits[(int)nl_token];
+            var nl_token = NativeHandle.ModelHandle.Tokens.Newline;
+            var nl_logit = logits[(int?)nl_token ?? 0];
 
             // Convert logits into token candidates
-            var candidates_p = LLamaTokenDataArray.Create(logits);
+            if (_samplingBuffer == null || _samplingBuffer.Length < logits.Length)
+                _samplingBuffer = new LLamaTokenData[logits.Length];
+            var candidates_p = LLamaTokenDataArray.Create(logits, _samplingBuffer);
 
             // Extract most recently returned tokens
             var last_n_repeat = Math.Min((int)ContextSize, repeatLastTokensCount);
@@ -371,19 +494,30 @@ namespace LLama
             candidates_p.RepetitionPenalty(NativeHandle, last_n_array, repeatPenalty, alphaFrequency, alphaPresence);
 
             // Restore newline token logit value if necessary
-            if (!penalizeNL)
+            if (!penalizeNL && nl_token.HasValue)
             {
-                var candidatesSpan = candidates_p.data.Span;
-                for (var i = 0; i < candidates_p.data.Length; i++)
+                var candidatesSpan = candidates_p.Data.Span;
+                for (var i = 0; i < candidates_p.Data.Length; i++)
                 {
                     ref var item = ref candidatesSpan[i];
                     if (item.id == nl_token)
                         item.logit = nl_logit;
                 }
-                candidates_p.sorted = false;
+                candidates_p.Sorted = false;
             }
 
             return candidates_p;
+        }
+
+        /// <summary>
+        /// Gets whether or not the Bos token should be added.
+        /// From common.cpp https://github.com/ggerganov/llama.cpp/blob/60325fa56f61c228464c9f065db3aa6a61f2156e/common/common.cpp#L2417
+        /// </summary>
+        /// <returns></returns>
+        public bool ShouldAddBosToken()
+        {
+            var addBos = NativeApi.llama_add_bos_token(NativeHandle.ModelHandle);
+            return addBos != -1 ? Convert.ToBoolean(addBos) : NativeHandle.LLamaVocabType == LLamaVocabType.SentencePiece;
         }
 
         #region eval overloads
@@ -394,7 +528,7 @@ namespace LLama
         {
             if (batch.TokenCount == 0)
                 return 0;
-            if (batch.TokenCount > Params.BatchSize)
+            if (batch.TokenCount > BatchSize)
                 throw new ArgumentException("Input contains more tokens than configured batch size", nameof(batch));
 
             return (DecodeResult)NativeHandle.Decode(batch);
@@ -408,6 +542,28 @@ namespace LLama
         {
             return Task.Run(() => Decode(batch), cancellationToken);
         }
+        
+        /// <summary>
+        /// </summary>
+        /// <param name="batch"></param>
+        public DecodeResult Decode(LLamaBatchEmbeddings batch)
+        {
+            if (batch.EmbeddingsCount == 0)
+                return 0;
+            if (batch.EmbeddingsCount > BatchSize)
+                throw new ArgumentException("Input contains more tokens than configured batch size", nameof(batch));
+            
+            return (DecodeResult)NativeHandle.Decode(batch);
+        }
+        
+        /// <summary>
+        /// </summary>
+        /// <param name="batch"></param>
+        /// <param name="cancellationToken"></param>
+        public Task<DecodeResult> DecodeAsync(LLamaBatchEmbeddings batch, CancellationToken cancellationToken = default)
+        {
+            return Task.Run(() => Decode(batch), cancellationToken);
+        }
         #endregion
 
         /// <inheritdoc />
@@ -417,12 +573,16 @@ namespace LLama
         }
 
         /// <summary>
-        /// The state of this model, which can be reloaded later
+        /// The state of this context, which can be reloaded later
         /// </summary>
         public class State
             : SafeLLamaHandleBase
         {
-            private ulong _size;
+            private readonly ulong _size;
+            /// <summary>
+            /// Get the size in bytes of this state object
+            /// </summary>
+            public ulong Size => _size;
 
             internal State(IntPtr memory, ulong size)
                 : base(memory, true)
@@ -441,6 +601,7 @@ namespace LLama
             /// Convert this state to a byte array
             /// </summary>
             /// <returns></returns>
+            [Obsolete("It is not generally safe to convert a state into a byte array - it will fail if the state is very large")]
             public byte[] ToByteArray()
             {
                 var bytes = new byte[_size];
@@ -453,11 +614,56 @@ namespace LLama
             /// </summary>
             /// <param name="bytes"></param>
             /// <returns></returns>
+            [Obsolete("It is not generally safe to convert a state into a byte array - it will fail if the state is very large")]
             public static State FromByteArray(byte[] bytes)
             {
                 var memory = Marshal.AllocHGlobal(bytes.Length);
                 Marshal.Copy(bytes, 0, memory, bytes.Length);
                 return new State(memory, (ulong)bytes.Length);
+            }
+        }
+
+        /// <summary>
+        /// The state of a single sequence, which can be reloaded later
+        /// </summary>
+        public class SequenceState
+            : SafeLLamaHandleBase
+        {
+            private readonly ulong _size;
+            /// <summary>
+            /// Get the size in bytes of this state object
+            /// </summary>
+            public ulong Size => _size;
+
+            internal SequenceState(IntPtr memory, ulong size)
+                : base(memory, true)
+            {
+                _size = size;
+            }
+
+            /// <inheritdoc />
+            protected override bool ReleaseHandle()
+            {
+                Marshal.FreeHGlobal(handle);
+                return true;
+            }
+
+            /// <summary>
+            /// Copy bytes to a destination pointer.
+            /// </summary>
+            /// <param name="dst">Destination to write to</param>
+            /// <param name="length">Length of the destination buffer</param>
+            /// <param name="offset">Offset from start of src to start copying from</param>
+            /// <returns>Number of bytes written to destination</returns>
+            public unsafe ulong CopyTo(byte* dst, ulong length, ulong offset = 0)
+            {
+                var copy = Math.Min(length, _size - offset);
+
+                var src = (byte*)DangerousGetHandle();
+                src += offset;
+
+                Buffer.MemoryCopy(src, dst, length, copy);
+                return copy;
             }
         }
     }

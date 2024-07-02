@@ -1,4 +1,4 @@
-﻿using LLama.Abstractions;
+using LLama.Abstractions;
 using LLama.Common;
 using LLama.Native;
 using System;
@@ -38,8 +38,8 @@ namespace LLama
                                 ILogger? logger = null)
             : base(context, logger)
         {
-            _inp_pfx = Context.Tokenize(instructionPrefix, true);
-            _inp_sfx = Context.Tokenize(instructionSuffix, false);
+            _inp_pfx = Context.Tokenize(instructionPrefix, true, true);
+            _inp_sfx = Context.Tokenize(instructionSuffix, false, true);
             _instructionPrefix = instructionPrefix;
         }
 
@@ -124,7 +124,7 @@ namespace LLama
             if (_is_prompt_run)
             {
                 // When running the first input (prompt) in inteactive mode, we should specially process it.
-                _embed_inps = Context.Tokenize(text, true).ToList();
+                _embed_inps = Context.Tokenize(text, true, true).ToList();
             }
             else
             {
@@ -135,7 +135,7 @@ namespace LLama
                 _consumedTokensCount = _embed_inps.Count;
                 _embed_inps.AddRange(_inp_pfx);
 
-                var line_inp = Context.Tokenize(text, false);
+                var line_inp = Context.Tokenize(text, false, true);
                 _embed_inps.AddRange(line_inp);
 
                 _embed_inps.AddRange(_inp_sfx);
@@ -163,7 +163,7 @@ namespace LLama
                 }
             }
 
-            if (_embeds.Count > 0 && _embeds.Last() == NativeApi.llama_token_eos(Context.NativeHandle.ModelHandle))
+            if (_embeds.Count > 0 && _embeds.Last() == Context.NativeHandle.ModelHandle.Tokens.EOS)
             {
                 args.WaitForInput = true;
             }
@@ -186,10 +186,13 @@ namespace LLama
                 _is_prompt_run = false;
                 if (_pastTokensCount + _embeds.Count > Context.ContextSize)
                 {
-                    HandleRunOutOfContext(inferenceParams.TokensKeep);
+                    // Ported from https://github.com/ggerganov/llama.cpp/blob/60325fa56f61c228464c9f065db3aa6a61f2156e/examples/main/main.cpp#L334
+                    // Instruct always uses input token size.
+                    var tokensToKeep = _embed_inps.Count;
+                    HandleRunOutOfContext(tokensToKeep);
                 }
 
-                TryReuseMathingPrefix();
+                TryReuseMatchingPrefix();
 
                 var (result, _) = Context.NativeHandle.Decode(_embeds, LLamaSeqId.Zero, batch, ref _pastTokensCount);
                 if (result != DecodeResult.Ok)
@@ -249,7 +252,7 @@ namespace LLama
                     _embeds.Add(_embed_inps[_consumedTokensCount]);
                     _last_n_tokens.Enqueue(_embed_inps[_consumedTokensCount]);
                     _consumedTokensCount++;
-                    if (_embeds.Count >= Context.Params.BatchSize)
+                    if (_embeds.Count >= Context.BatchSize)
                     {
                         break;
                     }
@@ -259,7 +262,7 @@ namespace LLama
             return Task.CompletedTask;
         }
         /// <summary>
-        /// The desciptor of the state of the instruct executor.
+        /// The descriptor of the state of the instruct executor.
         /// </summary>
         public class InstructExecutorState : ExecutorBaseState
         {
